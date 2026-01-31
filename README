@@ -1,0 +1,109 @@
+# Projet MOGPL — README
+
+> **But** : générer des instances de grille avec obstacles, définir un robot (position + orientation) et résoudre le problème de navigation A*. Le projet contient deux modes de fonctionnement : une interface « user-friendly » interactive et un mode *bench* pour lancer automatiquement des séries d’instances et mesurer les solveurs.
+
+---
+
+## Table des matières
+
+1. Prérequis
+2. Installation
+3. Structure du projet
+4. Formats d’instance (fichier)
+5. Usage — Mode 1 : Interface utilisateur (interactive)
+6. Usage — Mode 2 : Benchmarks / exécution automatisée
+7. Licence
+
+---
+
+## Prérequis
+
+* Python 3.8 ou supérieur (recommandé 3.10+).
+* Un terminal / shell (Linux, macOS, WSL ou Windows).
+* Si vous utilisez la génération d’obstacles par programmation linéaire : **Gurobi** + licence valide.
+* Accès en écriture dans le répertoire pour créer les fichiers d’instances et les sorties.
+
+---
+
+## Installation
+
+1. Clone du dépôt :
+
+```
+git clone <repo-url>
+cd projet_MOGPL
+```
+
+2. Si Gurobi est utilisé : installer `gurobipy` selon la documentation officielle.
+
+---
+
+## Structure du projet
+
+* **interface.py** — Interface utilisateur interactive.
+* **solution.py** — Solveurs + outils pour bench.
+* **bench.py** — Fonctions de benchmark (génération, métriques, plots).
+* **pl.py** — Génération via programmation linéaire (Gurobi).
+* **utils.py** — Fonctions utilitaires (lecture/écriture, heuristiques).
+* **input/** — Dossier recommandé pour stocker les instances.
+* **output/** — Dossier contenant résultats, logs, benchmarks.
+
+---
+
+## Formats d’instance (fichier)
+
+Format utilisé par `ecrire_fichier_instance` :
+
+1. Ligne 1 : `M N` (lignes, colonnes).
+2. M lignes suivantes : grille composée de `0` (libre) et `1` (obstacle).
+3. Ligne suivante : `x_d y_d x_a y_a orientation`.
+4. Dernière ligne : `0 0` (marqueur de fin).
+
+Exemple :
+
+```
+5 6
+0 0 1 0 0 0
+0 0 0 0 1 0
+0 1 0 0 0 0
+0 0 0 1 0 0
+0 0 0 0 0 0
+0 0 4 4 nord
+0 0
+```
+
+---
+
+## Usage — Mode 1 : Interface utilisateur (interactive)
+
+Le mode interactif se lance via :
+
+```
+python interface.py
+```
+
+Fonctionnement :
+
+* Saisie des paramètres de grille.
+* Génération des obstacles via `proglin`.
+* Saisie du départ, de l’arrivée et de l’orientation.
+* Création d’un fichier d’instance.
+* Lancement automatique du solveur (par défaut A*).
+
+---
+
+## Usage — Mode 2 : Benchmarks / exécution automatisée
+
+Commandes typiques :
+
+```
+python solution.py -h
+python solution.py bench -n 100 -m 1000 -obs 0 100 300 6000 -i 8 -s all
+python solution.py solve input/test.txt -s A_star
+```
+
+---
+
+## Licence
+
+MIT
