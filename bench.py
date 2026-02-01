@@ -8,7 +8,30 @@
 # python bench.py bench -i 6 -s all -t v -m 100 1000 100 -n 100 1000 100
 """
 
+
+"""
+Script de benchmark : Robot sur Grille.
+Version : FINALE (Pro & Robust)
+
+Ce script permet de :
+1. Résoudre une instance unique et sauvegarder le chemin.
+2. Lancer un benchmark massif en parallèle.
+3. Générer des graphiques comparant la rapidité (Temps) et la qualité (Longueur du chemin).
+
+Utilisation :
+-------------
+# 1. Mode Benchmark Combinatoire ('u') : N varie, M et Obs sont fixes.
+python bench.py bench -n 20 40 60 80 -m 50 -obs 10 -i 10 -s all -t u
+
+# 2. Mode Benchmark Linéaire ('v') : Tout varie ensemble (Triplets [N,M,Obs]).
+python bench.py bench -n 20 40 -m 20 40 -obs 5 10 -i 10 -s all -t v
+
+# 3. Mode Résolution simple :
+python bench.py solve input/input.txt -s A_star_spectrale
+"""
+
 import time
+import matplotlib
 import matplotlib.pyplot as plt
 from collections import defaultdict
 import numpy as np
@@ -19,419 +42,447 @@ import csv
 import os
 import multiprocessing
 
+# --- Imports locaux ---
+# Ces fichiers doivent être dans le même répertoire
 from solveurs import Bfs_optimise, A_star, h_super_spectrale, h_manhattan
 from utils import load, genere_instance
 
 
+# =============================================================================
+# WRAPPER MULTIPROCESSING (CRUCIAL)
+# =============================================================================
+
+class SolverWrapper:
+    """
+    Remplace functools.partial pour le multiprocessing.
+    
+    Problème résolu : 'partial' ne conserve pas l'attribut __name__ lors du
+    processus de sérialisation (pickling) vers les workers.
+    Cette classe encapsule la fonction et ses arguments (ex: l'heuristique h)
+    tout en garantissant que .__name__ est toujours accessible.
+    """
+    def __init__(self, func, name, **kwargs):
+        self.func = func
+        self.kwargs = kwargs
+        self.__name__ = name
+
+    def __call__(self, *args, **kwargs):
+        # Fusionne les arguments par défaut (self.kwargs) avec ceux de l'appel
+        combined_kwargs = {**self.kwargs, **kwargs}
+        return self.func(*args, **combined_kwargs)
+
+
+# =============================================================================
+# CONFIGURATION DES SOLVEURS
+# =============================================================================
+
+SOLVER_MAP = {
+    'Bfs_optimise': Bfs_optimise,
+    
+    # On crée des variantes d'A* pré-configurées avec SolverWrapper
+    'A_star_manhattan': SolverWrapper(A_star, 'A_star_manhattan', h=h_manhattan),
+    'A_star_spectrale': SolverWrapper(A_star, 'A_star_spectrale', h=h_super_spectrale),
+}
+
+
+# =============================================================================
+# FONCTIONS CŒUR (CORE)
+# =============================================================================
 
 def run_solver(filename, solveur, output):
     """
-    Exécute le mode 'solve' sur un fichier unique.
-    Écrit la solution dans <output>/chemin_filname.txt.
+    Mode 'solve' : Résout un fichier unique, affiche les stats et sauve le chemin.
     """
-    print(f"--- Mode Résolution: {filename} ---")
-
+    print(f"--- Mode Résolution : {filename} ---")
+    
+    # Chargement
     G, etat = load(filename)
-    print(etat)
-
     if G is None or etat is None:
-        print(f"Erreur: Fichier '{filename}' non trouvé ou '0 0' au début.")
+        print(f"Erreur: Impossible de charger '{filename}'.")
         return
 
-    print("Graphe construit. Lancement du solver...")
-    start_bfs_time = time.process_time()
+    print(f"Lancement de : {solveur.__name__}...")
+    
+    # Exécution
+    t0 = time.process_time()
     path = solveur(G, (etat['start'], etat['orientation']), etat['goal'])
-    end_bfs_time = time.process_time()
-    bfs_time = end_bfs_time - start_bfs_time
+    duration = time.process_time() - t0
 
+    # Résultat
     if path:
-        print("Chemin minimum trouvé:")
-        if len(path) > 20:
-            print(f"[Chemin de {len(path)-1} actions. Début et fin ci-dessous]")
-            print(path[0])
-            print("[...]")
-            print(path[-1])
-        else:
-            print(path)
-            print(f"\nLongueur du chemin (nombre d'actions): {len(path)-1}")
-
+        cout = len(path) - 1
+        print(f"-> Succès !")
+        print(f"   Temps d'exécution : {duration:.6f} s")
+        print(f"   Longueur du chemin : {cout} pas")
+        
         output_path = os.path.join(output, f"chemin_{os.path.basename(filename)}")
-
         with open(output_path, 'w', encoding='utf-8') as f:
             for etape in path:
                 f.write(f"{etape}\n")
-
-        print(f"-> Succès : Le chemin a été sauvegardé dans '{output_path}'.")
-
+        print(f"   Chemin sauvegardé dans : '{output_path}'")
     else:
-        print("--- Aucun chemin trouvé. ---")
-
-    print(f"\nTemps d'exécution : {bfs_time:.6f} secondes")
-
+        print("--- Échec : Aucun chemin trouvé. ---")
 
 
 def worker_task(args):
     """
-    Fonction exécutée par un processus du pool.
-    Args est un tuple : (N, M, obs_count, solveurs)
+    Tâche exécutée par un processus (Worker) du pool.
+    1. Génère une instance aléatoire.
+    2. Lance TOUS les solveurs demandés sur cette instance.
+    3. Retourne les métriques (Temps et Coût) pour chaque solveur.
     """
     N, M, obs_count, solveurs = args
     results = {}
 
     try:
+        # 1. Génération de l'instance
         inst = genere_instance(M, N, obs_count)
-
-        # 1. On prépare les arguments "Communs" (Positionnels)
         G = inst['graph']
         start = (inst['start'], inst['orientation'])
         goal = inst['goal']
 
-        # 2. On prépare les arguments "Spéciaux" (Keyword Arguments)
-        # On met TOUT ici. Ceux qui en ont besoin les prendront.
-        # Les autres les ignoreront grâce au **kwargs.
+        # 2. Contexte (Pré-calculs éventuels pour heuristiques complexes)
         context_data = {
-            'psi': inst['psi'],
-            'eigenvalue': inst['eigenvalue'],
-            'h': h_super_spectrale,
+            'psi': inst.get('psi'),
+            'eigenvalue': inst.get('eigenvalue'), 
             'N_cols': N - 1
         }
 
-        # 3. La boucle propre et universelle
-        for solver_func in solveurs:
-            solver_name = solver_func.__name__
-            start_time = time.process_time()
+        # 3. Exécution des solveurs
+        for solver_obj in solveurs:
+            name = solver_obj.__name__
+            
+            t0 = time.process_time()
+            path = solver_obj(G, start, goal, **context_data)
+            t1 = time.process_time()
+            
+            duration = t1 - t0
+            
+            # Si path est None (échec), le coût est None
+            cost = len(path) - 1 if path is not None else None
+            
+            results[name] = {'time': duration, 'cost': cost}
 
-            solver_func(G, start, goal, **context_data)
-
-            end_time = time.process_time()
-            results[solver_name] = end_time - start_time
-
-        return (N, M, obs_count), results, None # Pas d'erreur
+        return (N, M, obs_count), results, None 
 
     except Exception as e:
-        # On capture l'erreur pour ne pas crasher le pool entier
-        return (N, M, obs_count), None, e
+        # On capture l'erreur ici pour ne pas crasher tout le benchmark
+        return (N, M, obs_count), None, str(e)
 
 
-def run_benchmark(sizes_n, sizes_m, obstacles_list, mode, num_instances, solveurs, output, num_workers, chunk_size=1):
+def run_benchmark(sizes_n, sizes_m, obs_list, mode, n_inst, solveurs, output, workers):
     """
-    Exécute le benchmark en parallèle via multiprocessing.Pool.
+    Orchestre le benchmark en parallèle.
     """
-    print(f"--- Mode Benchmark (Multiprocessing Pool: {num_workers} workers) ---")
-    mode = str(mode)
-
-    # 1. Créer les combinaisons de paramètres
-    if mode == "u":
-        combinations = list(product(sizes_n, sizes_m, obstacles_list))
-        print("Mode combinatoire (produit cartésien).")
-    elif mode == "v":
-        if not (len(sizes_n) == len(sizes_m) == len(obstacles_list)):
-            raise ValueError("Mode 'v' requiert que les listes aient la même longueur.")
-        combinations = list(zip(sizes_n, sizes_m, obstacles_list))
-        print("Mode linéaire (par triplets).")
-    else:
-        raise ValueError(f"Mode inconnu: {mode}. Utiliser 'u' ou 'v'.")
-
-    # 2. Préparer la liste de toutes les tâches à effectuer
-    # Chaque tâche est un tuple d'arguments pour worker_task
+    print(f"--- Mode Benchmark (Workers: {workers}) ---")
+    
+    # 1. Préparation des tâches
     tasks = []
-    for N, M, obs_count in combinations:
-        for _ in range(num_instances):
-            tasks.append((N, M, obs_count, solveurs))
+    
+    if mode == "u":
+        # Produit Cartésien
+        combinations = list(product(sizes_n, sizes_m, obs_list))
+        print(f"Mode 'u' (Combinatoire) : {len(combinations)} configurations.")
+    elif mode == "v":
+        # Zip (Linéaire)
+        if not (len(sizes_n) == len(sizes_m) == len(obs_list)):
+            raise ValueError("Mode 'v' : Les listes N, M et Obs doivent avoir la même taille.")
+        combinations = list(zip(sizes_n, sizes_m, obs_list))
+        print(f"Mode 'v' (Linéaire) : {len(combinations)} configurations.")
+    else:
+        raise ValueError("Mode inconnu (utilisez 'u' ou 'v').")
+
+    # On multiplie par le nombre d'instances par config
+    for params in combinations:
+        for _ in range(n_inst):
+            tasks.append((*params, solveurs))
 
     total_tasks = len(tasks)
-    print(f"Préparation de {total_tasks} simulations...")
+    print(f"Lancement de {total_tasks} simulations...")
+    
+    # Structure de stockage : raw_data[(solver, N, M, O)] = {'times': [], 'costs': []}
+    raw_data = defaultdict(lambda: {'times': [], 'costs': []})
 
-    results_raw = defaultdict(list)
+    # 2. Exécution Multiprocessing
+    with multiprocessing.Pool(processes=workers) as pool:
+        # imap_unordered permet d'avoir une barre de progression fluide
+        iterator = pool.imap_unordered(worker_task, tasks)
 
-    # 3. Lancement du Pool
-    with multiprocessing.Pool(processes=num_workers) as pool:
-        results_iterator = pool.imap_unordered(worker_task, tasks, chunksize=chunk_size)
-
-        print(f"Exécution en cours...")
-
-        for i, (params, task_results, error) in enumerate(results_iterator, 1):
-            N, M, obs_count = params
-
+        for i, (params, task_res, error) in enumerate(iterator, 1):
             if error:
-                print(f" [Erreur] Paramètres ({N}, {M}, {obs_count}): {error}")
-            else:
-                # Agrégation des résultats
-                for s_name, duration in task_results.items():
-                    key = (s_name, N, M, obs_count)
-                    results_raw[key].append(duration)
+                print(f" [Erreur] {params} : {error}")
+                continue
+            
+            # Agrégation des résultats
+            for s_name, metrics in task_res.items():
+                key = (s_name, *params)
+                raw_data[key]['times'].append(metrics['time'])
+                
+                # On ne stocke le coût que si le solveur a réussi
+                if metrics['cost'] is not None:
+                    raw_data[key]['costs'].append(metrics['cost'])
 
-            # Affichage de progression simple
-            if i % max(1, total_tasks // 10) == 0 or i == total_tasks:
-                print(f"  Progression : {i}/{total_tasks} ({(i/total_tasks)*100:.0f}%)")
+            # Barre de progression simple
+            if i % max(1, total_tasks//10) == 0 or i == total_tasks:
+                print(f"  Progression : {int(i/total_tasks*100)}%")
 
-    print("\nBenchmark terminé.")
+    # 3. Analyse et Sauvegarde
+    out_dir = os.path.join(output, "bench")
+    csv_path = os.path.join(out_dir, "resultats_complets.csv")
+    
+    stats_processed = analyser_et_sauvegarder(raw_data, csv_path)
 
-    # 4. Analyser et sauvegarder
-    output_dir = os.path.join(output, "bench")
-    os.makedirs(output_dir, exist_ok=True)
-    csv_path = os.path.join(output_dir, "resultats_benchmark.csv")
-
-    # Appel des fonctions d'analyse existantes
-    results_med = analyser_et_sauvegarder(results_raw, csv_path)
-
-    # Tracer la courbe
+    # 4. Traçage des courbes
     solver_names = [s.__name__ for s in solveurs]
-    tracer_courbe(results_med, solver_names, sizes_n, sizes_m, obstacles_list, output_dir, mode)
+    tracer_courbes_completes(stats_processed, solver_names, sizes_n, sizes_m, obs_list, out_dir, mode)
 
 
+# =============================================================================
+# ANALYSE STATISTIQUE ET CSV
+# =============================================================================
 
-
-
-def analyser_et_sauvegarder(results_raw, path_fichier_res):
+def analyser_et_sauvegarder(raw_data, filepath):
     """
-    Calcule statistiques (médiane, moyenne, std, count) pour chaque clé
-    results_raw: dict {(solver_name, N, M, O): [t1, t2, ...]}
-    Écrit un CSV dans path_fichier_res et retourne results_med = {(solver_name, N, M, O): median_time}
+    Calcule les statistiques (Médiane, Moyenne, Ecart-Type) pour le Temps et le Coût.
+    Écrit le tout dans un CSV détaillé.
     """
-    print(f"Analyse des résultats -> écriture CSV: {path_fichier_res}")
+    print(f"\n[Analyse] Écriture des résultats -> {filepath}")
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    
+    stats_processed = {}
 
-    results_med = {}
-    stats = {}
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "solver", "N", "M", "Obs", 
+            "time_median", "time_mean", "time_std", 
+            "cost_median", "cost_mean", "cost_std", 
+            "success_count"
+        ])
 
-    for key, times in results_raw.items():
-        arr = np.array(times, dtype=float)
-        median = float(np.median(arr))
-        mean = float(np.mean(arr))
-        std = float(np.std(arr, ddof=0))
-        count = int(arr.size)
-        stats[key] = (median, mean, std, count)
-        results_med[key] = median
+        # Tri des clés pour un fichier propre
+        sorted_keys = sorted(raw_data.keys(), key=lambda x: (x[0], x[1], x[2], x[3]))
 
-    with open(path_fichier_res, "w", newline="", encoding="utf-8") as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(["solver", "N", "M", "Obstacles", "median_s", "mean_s", "std_s", "count"])
-        for key in sorted(stats.keys()):
-            solver, N, M, O = key
-            median, mean, std, count = stats[key]
-            writer.writerow([solver, N, M, O, f"{median:.6f}", f"{mean:.6f}", f"{std:.6f}", count])
+        for key in sorted_keys:
+            d = raw_data[key]
+            times = np.array(d['times'], dtype=float)
+            costs = np.array(d['costs'], dtype=float)
+            
+            # Stats Temps
+            if times.size > 0:
+                t_med = np.median(times)
+                t_mean = np.mean(times)
+                t_std = np.std(times)
+            else:
+                t_med = t_mean = t_std = 0
 
-    return results_med
+            # Stats Coût
+            if costs.size > 0:
+                c_med = np.median(costs)
+                c_mean = np.mean(costs)
+                c_std = np.std(costs)
+            else:
+                c_med = c_mean = c_std = 0
+
+            # Stockage structuré pour le plot
+            stats_processed[key] = {
+                'time': {'median': t_med, 'std': t_std},
+                'cost': {'median': c_med, 'std': c_std}
+            }
+            
+            s_name, n, m, o = key
+            writer.writerow([
+                s_name, n, m, o, 
+                f"{t_med:.6f}", f"{t_mean:.6f}", f"{t_std:.6f}", 
+                f"{c_med:.2f}", f"{c_mean:.2f}", f"{c_std:.2f}", 
+                costs.size
+            ])
+            
+    return stats_processed
 
 
-def tracer_courbe(results_med, solver_names, sizes_n, sizes_m, obstacles_list, plot_dir, mode="u"):
+# =============================================================================
+# GRAPHIQUES PRO (PLOTTING)
+# =============================================================================
+
+def tracer_courbes_completes(stats, solver_names, Ns, Ms, Os, plot_dir, mode):
     """
-    Trace la courbe de performance.
-    Ne trace que si:
-      - mode == 'u'  : une seule variable parmi N, M, Obstacles varie (comme avant)
-      - mode == 'v'  : on trace les triplets (axe x = index des triplets), avec labels lisibles
+    Génère les graphiques pour :
+    1. La performance Temporelle (Médiane).
+    2. La qualité de la solution (Longueur Médiane).
+    
+    Inclus des échelles Linéaires et Logarithmiques.
     """
-    plot_dir = os.path.join(plot_dir, "plot")
-    os.makedirs(plot_dir, exist_ok=True)
-
-    mode = str(mode)
-
+    # Force 'Agg' pour éviter les erreurs d'affichage (pas de GUI requis)
+    matplotlib.use('Agg') 
+    
+    # Style moderne
     try:
-        plt.figure(figsize=(10, 6))
+        plt.style.use('seaborn-v0_8-whitegrid')
+    except:
+        plt.style.use('ggplot') # Fallback
 
-        if mode == "u":
-            # Ne tracer que si une seule variable varie
-            varying_params = []
-            if len(sizes_n) > 1: varying_params.append('N')
-            if len(sizes_m) > 1: varying_params.append('M')
-            if len(obstacles_list) > 1: varying_params.append('Obstacles')
+    os.makedirs(os.path.join(plot_dir, "plots"), exist_ok=True)
+    plot_dir = os.path.join(plot_dir, "plots")
 
-            if len(varying_params) != 1:
-                print(f"\nTraçage ignoré : {len(varying_params)} variables changent.")
-                print("Un graphe 2D ne peut être tracé que si une seule dimension varie (mode 'u').")
-                plt.close()
-                return
+    # --- 1. Détection de la variable d'axe X ---
+    if mode == "u":
+        # On cherche quelle variable change parmi N, M, Obs
+        if len(Ns) > 1:   
+            var_name, x_vals, x_label = 'N', sorted(Ns), "Taille N (Lignes)"
+            get_key = lambda s, x: (s, x, Ms[0], Os[0])
+        elif len(Ms) > 1: 
+            var_name, x_vals, x_label = 'M', sorted(Ms), "Taille M (Colonnes)"
+            get_key = lambda s, x: (s, Ns[0], x, Os[0])
+        else:             
+            var_name, x_vals, x_label = 'Obs', sorted(Os), "Nombre d'Obstacles"
+            get_key = lambda s, x: (s, Ns[0], Ms[0], x)
+            
+    else: # mode v
+        var_name, x_vals, x_label = 'Config', list(range(len(Ns))), "Configuration (N, M, O)"
+        # x est un index ici
+        get_key = lambda s, x_idx: (s, Ns[x_idx], Ms[x_idx], Os[x_idx])
 
-            variable_name = varying_params[0]
-            x_values = []
-            xlabel = ""
-            title = ""
+    # --- 2. Définition des Métriques à tracer ---
+    metrics_to_plot = [
+        {
+            'id': 'time', 
+            'title': 'Temps d\'exécution', 
+            'ylabel': 'Temps Médian (s)', 
+            'log_possible': True
+        },
+        {
+            'id': 'cost', 
+            'title': 'Longueur du Chemin (Coût)', 
+            'ylabel': 'Longueur Médiane (pas)', 
+            'log_possible': False # Le log sur le coût est rarement pertinent
+        }
+    ]
+    
+    # Couleurs fixes par solveur pour cohérence
+    colors = plt.cm.tab10(np.linspace(0, 1, len(solver_names)))
+    c_map = dict(zip(solver_names, colors))
 
-            if variable_name == 'N':
-                x_values = sorted(sizes_n)
-                const_M = sizes_m[0]
-                const_O = obstacles_list[0]
-                xlabel = "Taille N"
-                title = f"Temps Solveur vs Taille N (M={const_M}, Obstacles={const_O})"
-                for solver_name in solver_names:
-                    y_values = [results_med.get((solver_name, n, const_M, const_O), float('nan')) for n in x_values]
-                    plt.plot(x_values, y_values, marker='o', linestyle='-', label=solver_name)
+    print(f"[Plot] Génération des courbes (Variable: {var_name})...")
 
-            elif variable_name == 'M':
-                x_values = sorted(sizes_m)
-                const_N = sizes_n[0]
-                const_O = obstacles_list[0]
-                xlabel = "Taille M"
-                title = f"Temps Solveur vs Taille M (N={const_N}, Obstacles={const_O})"
-                for solver_name in solver_names:
-                    y_values = [results_med.get((solver_name, const_N, m, const_O), float('nan')) for m in x_values]
-                    plt.plot(x_values, y_values, marker='o', linestyle='-', label=solver_name)
+    # --- 3. Boucle de génération ---
+    for met in metrics_to_plot:
+        
+        # On génère Linear ET Log (si pertinent)
+        scales = ["linear"]
+        if met['log_possible']: scales.append("log")
 
-            elif variable_name == 'Obstacles':
-                x_values = sorted(obstacles_list)
-                const_N = sizes_n[0]
-                const_M = sizes_m[0]
-                xlabel = "Nombre d'Obstacles"
-                title = f"Temps Solveur vs Obstacles (Grille {const_N}x{const_M})"
-                for solver_name in solver_names:
-                    y_values = [results_med.get((solver_name, const_N, const_M, o), float('nan')) for o in x_values]
-                    plt.plot(x_values, y_values, marker='o', linestyle='-', label=solver_name)
+        for scale in scales:
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            has_data = False
+            for solv in solver_names:
+                medians, stds, xs = [], [], []
+                
+                for x in x_vals:
+                    k = get_key(solv, x)
+                    if k in stats:
+                        # On récupère la médiane et le std
+                        val_med = stats[k][met['id']]['median']
+                        val_std = stats[k][met['id']]['std']
+                        
+                        # On ignore si la valeur est 0 (ex: échec total)
+                        if val_med > 0: 
+                            medians.append(val_med)
+                            stds.append(val_std)
+                            xs.append(x)
+                
+                if xs:
+                    has_data = True
+                    medians, stds = np.array(medians), np.array(stds)
+                    col = c_map[solv]
+                    
+                    # 1. Courbe Principale (MÉDIANE)
+                    ax.plot(xs, medians, 'o-', lw=2, label=solv, color=col)
+                    
+                    # 2. Zone d'ombre (MÉDIANE +/- STD)
+                    lower = np.maximum(0, medians - stds)
+                    upper = medians + stds
+                    ax.fill_between(xs, lower, upper, color=col, alpha=0.15)
 
-            plt.title(title)
-            plt.xlabel(xlabel)
-            plt.ylabel("Temps médian (s)")
-            plt.grid(True)
-            plt.xticks(x_values)
-            plt.legend()
-            out = os.path.join(plot_dir, f"{variable_name}.png")
-            plt.savefig(out)
-            plt.close()
-            print(f"Courbe de performance sauvegardée : {out}")
+            if not has_data:
+                plt.close(fig)
+                continue
 
-        elif mode == "v":
-            # mode linéaire: traçage des triplets on met l'index sur l'axe x, avec étiquettes
-            if not (len(sizes_n) == len(sizes_m) == len(obstacles_list)):
-                print("Traçage mode 'v' ignoré : tailles incohérentes.")
-                plt.close()
-                return
+            # Cosmétique du graphe
+            ax.set_title(f"{met['title']} vs {var_name} ({scale.capitalize()})", fontsize=14, fontweight='bold')
+            ax.set_ylabel(met['ylabel'], fontsize=12)
+            ax.set_xlabel(x_label, fontsize=12)
+            ax.legend(frameon=True, fancybox=True, framealpha=0.9, shadow=True, loc='best')
+            ax.grid(True, which="both", linestyle='--', alpha=0.6)
 
-            x_indices = list(range(len(sizes_n)))
-            # créer des labels lisibles pour chaque triplet
-            x_labels = [f"N={n},M={m},O={o}" for n, m, o in zip(sizes_n, sizes_m, obstacles_list)]
-            title = "Temps Solveur vs Triplets (mode 'v')"
-            xlabel = "Instances (N, M, Obstacles)"
+            if scale == "log":
+                ax.set_yscale('log')
 
-            for solver_name in solver_names:
-                y_values = []
-                for n, m, o in zip(sizes_n, sizes_m, obstacles_list):
-                    y = results_med.get((solver_name, n, m, o), float('nan'))
-                    y_values.append(y)
-                plt.plot(x_indices, y_values, marker='o', linestyle='-', label=solver_name)
+            # Gestion des étiquettes pour le mode 'v'
+            if mode == "v":
+                ax.set_xticks(x_vals)
+                labels = [f"{n}x{m}\n({o} obs)" for n, m, o in zip(Ns, Ms, Os)]
+                ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=9)
 
-            plt.title(title)
-            plt.xlabel(xlabel)
-            plt.ylabel("Temps médian (s)")
-            plt.grid(True)
-            plt.xticks(x_indices, x_labels, rotation=45, ha='right')
-            plt.legend()
-            out = os.path.join(plot_dir, "triplets_v.png")
             plt.tight_layout()
-            plt.savefig(out)
-            plt.close()
-            print(f"Courbe (mode 'v') sauvegardée : {out}")
-
-        else:
-            print(f"Mode de tracé inconnu: {mode}")
-            plt.close()
-
-    except Exception as e:
-        print(f"\nErreur lors du traçage de la courbe: {e}")
-        try:
-            plt.close()
-        except:
-            pass
+            
+            filename = f"Graph_{var_name}_{met['id']}_{scale}.png"
+            plt.savefig(os.path.join(plot_dir, filename), dpi=200)
+            plt.close(fig)
+            print(f"  -> Sauvegardé : {filename}")
 
 
-
-SOLVER_MAP = {
-    'Bfs_optimise': Bfs_optimise,
-    'A_star': A_star,
-}
-
-HEURISTIQUE_MAP = {
-    'h_manhattan': h_manhattan,
-    'h_super_spectrale': h_super_spectrale,
-}
-
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Solveur et benchmark pour le problème du robot sur grille.",
-        epilog="Exemples d'utilisation: \n"
-               "  python votre_script.py solve input.txt --solveur A_star\n"
-               "  python votre_script.py bench -n 30 -m 30 -o 50 100 -i 10 --solveurs Bfs A_star"
-    )
-    # Valide les noms de solveurs disponibles
-    available_solvers = list(SOLVER_MAP.keys()) + ['all']
+    parser = argparse.ArgumentParser(description="Benchmark Robot Grille")
+    subparsers = parser.add_subparsers(dest="mode", required=True)
 
-    subparsers = parser.add_subparsers(dest="mode", required=True, 
-                                     help="Mode d'exécution")
+    # --- Sous-commande : SOLVE ---
+    p_solve = subparsers.add_parser('solve', help="Résoudre une instance unique")
+    p_solve.add_argument('filename', help="Fichier d'entrée")
+    p_solve.add_argument('-o', '--output', default='output')
+    p_solve.add_argument('-s', '--solveur', default='A_star_manhattan', choices=SOLVER_MAP.keys())
 
-    # 1. Sous-parser pour le mode 'solve'
-    solve_parser = subparsers.add_parser('solve', 
-                                         help='Résoudre un problème unique depuis un fichier.')
-    solve_parser.add_argument('filename', type=str, 
-                              help='Nom du fichier d\'entrée (ex: input.txt)')
-    solve_parser.add_argument('-o', '--output', type=str, 
-                              default="output",
-                              help=f'Dossier de sortie du programme')
-    solve_parser.add_argument('-s', '--solveur', type=str, 
-                              default=available_solvers[0],
-                              choices=available_solvers,
-                              help=f'Solveur à utiliser (défaut: {available_solvers[0]})')
-
-
-    # 2. Sous-parser pour le mode 'bench'
-    bench_parser = subparsers.add_parser('bench', 
-                                         help='Lancer le benchmark sur des combinaisons de N, M, et Obstacles.')
-    bench_parser.add_argument('-o', '--output', type=str, 
-                              default="output",
-                              help=f'Dossier de sortie du programme')
-    bench_parser.add_argument('-n', '--sizes-n', nargs='+', type=int, 
-                              help='Liste des tailles N (ex: -n 10 20 30)')
-    bench_parser.add_argument('-m', '--sizes-m', nargs='+', type=int, 
-                              help='Liste des tailles M (ex: -m 10 20 30)')
-    bench_parser.add_argument('-obs', '--obstacles', nargs='+', type=int, 
-                              help='Liste des nombres d\'obstacles (ex: -o 50 100 150)')
-    bench_parser.add_argument('-t', '--test_type', type=str, default="u",
-        choices=["u", "v"],
-        help='Mode de test combinatoire (u) ou linéaire (v)')
-    bench_parser.add_argument('-i', '--instances', type=int, default=10,
-                              help='Nombre d\'instances par combinaison (défaut: 10)')
-    bench_parser.add_argument('-s', '--solveurs', nargs='+', type=str, 
-                              required=True,
-                              dest="solveurs",
-                              choices=available_solvers,
-                              help='Un ou plusieurs solveur(s) à tester (ex: --solveurs A_star Bfs)')
-    bench_parser.add_argument('-w', '--workers', type=int,
-                              default=multiprocessing.cpu_count()-1)
+    # --- Sous-commande : BENCH ---
+    p_bench = subparsers.add_parser('bench', help="Lancer un benchmark")
+    p_bench.add_argument('-n', '--sizes-n', nargs='+', type=int, help="Tailles N")
+    p_bench.add_argument('-m', '--sizes-m', nargs='+', type=int, help="Tailles M")
+    p_bench.add_argument('-obs', '--obstacles', nargs='+', type=int, help="Nombre d'obstacles")
+    p_bench.add_argument('-i', '--instances', type=int, default=10, help="Nb répétitions par config")
+    p_bench.add_argument('-s', '--solveurs', nargs='+', required=True, help="Liste solveurs ou 'all'")
+    p_bench.add_argument('-t', '--test_type', default='u', choices=['u', 'v'], help="Mode u (produit) ou v (linéaire)")
+    p_bench.add_argument('-o', '--output', default='output')
+    p_bench.add_argument('-w', '--workers', type=int, default=multiprocessing.cpu_count()-1)
 
     args = parser.parse_args()
-    os.makedirs(args.output, exist_ok=True)
 
+    # Dispatching
     if args.mode == 'solve':
-        print("vv", args.output)
-        # Convertir le nom (str) en fonction (callback)
-        solver_function = SOLVER_MAP[args.solveur]
-        # Passer la fonction à run_solver
-        run_solver(args.filename, solver_function, args.output)
-
+        run_solver(args.filename, SOLVER_MAP[args.solveur], args.output)
+    
     elif args.mode == 'bench':
-        solver_functions = [] # Liste finale des fonctions
-
-        # Si l'utilisateur a tapé "all"
+        # Sélection des solveurs
         if 'all' in args.solveurs:
-            solver_functions = list(SOLVER_MAP.values())
-            print(f"Test de TOUS les solveurs : {[s.__name__ for s in solver_functions]}")
+            selected_solvers = list(SOLVER_MAP.values())
         else:
-            # Sinon, on valide et on mappe manuellement
-            try:
-                solver_functions = [SOLVER_MAP[name] for name in args.solveurs]
-            except KeyError as e:
-                # Gérer une erreur si le nom n'existe pas
-                print(f"Erreur: Le solveur '{e.args[0]}' n'est pas reconnu.")
-                print(f"Solveurs disponibles: {list(SOLVER_MAP.keys())}")
-                sys.exit(1)
-
-        run_benchmark(args.sizes_n, 
-                      args.sizes_m, 
-                      args.obstacles,
-                      args.test_type,
-                      args.instances, 
-                      solveurs=solver_functions,
-                      output=args.output,
-                      num_workers=args.workers)
-
+            selected_solvers = []
+            for s in args.solveurs:
+                if s in SOLVER_MAP:
+                    selected_solvers.append(SOLVER_MAP[s])
+                else:
+                    print(f"Attention: Solveur '{s}' inconnu.")
+            if not selected_solvers:
+                sys.exit("Erreur : Aucun solveur valide sélectionné.")
+        
+        run_benchmark(
+            args.sizes_n, args.sizes_m, args.obstacles, 
+            args.test_type, args.instances, selected_solvers, 
+            args.output, args.workers
+        )
 
 if __name__ == "__main__":
     main()

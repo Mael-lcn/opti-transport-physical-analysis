@@ -7,6 +7,8 @@ from scipy.sparse.linalg import spsolve, MatrixRankWarning
 from utils import *
 from solution import *
 
+
+
 # --- 1. FONCTIONS UTILITAIRES ---
 def path_length(path):
     if not path: return 0
@@ -19,6 +21,7 @@ def path_length(path):
     if len(coords) < 2: return 0
     pts = np.array(coords)
     return np.sum(np.sqrt(np.sum(np.diff(pts, axis=0)**2, axis=1)))
+
 
 def extract_flux_path(V, node_to_idx, graph, start, goal):
     path = [start]
@@ -36,14 +39,14 @@ def extract_flux_path(V, node_to_idx, graph, start, goal):
         curr = next_node
     return path
 
-# --- 2. SOLVEURS ---
 
+# --- 2. SOLVEURS ---
 def solve_flux_spectral(graph, etat):
     # --- PHASE 1 : CONSTRUCTION (Hors Chrono) ---
     nodes = list(graph.keys())
     node_to_idx = {node: i for i, node in enumerate(nodes)}
     num_nodes = len(nodes)
-    
+
     data, rows, cols = [], [], []
     for u, neighbors in graph.items():
         if u not in node_to_idx: continue
@@ -62,7 +65,7 @@ def solve_flux_spectral(graph, etat):
 
     L = sp.csr_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes))
     b = np.zeros(num_nodes)
-    
+
     try:
         b[node_to_idx[etat['start']]] = 1
         b[node_to_idx[etat['goal']]] = -1
@@ -80,16 +83,17 @@ def solve_flux_spectral(graph, etat):
         with warnings.catch_warnings():
             warnings.filterwarnings('error', category=MatrixRankWarning)
             V[keep] = spsolve(L[keep, :][:, keep], b[keep])
-        
+
         # L'extraction fait partie de la "résolution" du chemin
         path = extract_flux_path(V, node_to_idx, graph, etat['start'], etat['goal'])
-        
+
     except:
         return 0, 0, []
 
     dt = time.time() - t0
     length = path_length(path)
     return dt, length, path
+
 
 def solve_astar_optimal(graph, etat):
     # Pour A*, tout est "résolution" car il n'y a pas de pré-calcul matriciel
@@ -107,8 +111,8 @@ def solve_astar_optimal(graph, etat):
     length = path_length(path)
     return dt, length, path
 
-# --- 3. BENCHMARK ULTIME ---
 
+# --- 3. BENCHMARK ULTIME ---
 def run_ultimate_benchmark():
     M, N = 50, 50
     obstacle_counts = range(10, 301, 40)
@@ -170,10 +174,10 @@ def run_ultimate_benchmark():
                 samples_astar_dist.append(d_a_check)
                 
                 valid_samples += 1
-                
+
             except Exception:
                 continue
-        
+
         if valid_samples > 0:
             avg_t_flux = np.mean(medians_flux_time)
             avg_t_astar = np.mean(medians_astar_time)
@@ -191,6 +195,7 @@ def run_ultimate_benchmark():
             print(f"{nb_obs:<8} | Trop dense (0 valide)")
 
     return results
+
 
 def plot_benchmark(res):
     if not res['obstacles']: return
@@ -217,6 +222,7 @@ def plot_benchmark(res):
     
     plt.tight_layout()
     plt.show()
+
 
 if __name__ == "__main__":
     print("Benchmark Ultime (Construction exclue du temps Flux) ...")
