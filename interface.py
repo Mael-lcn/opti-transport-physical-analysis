@@ -1,6 +1,6 @@
 import os
 
-from solution import A_star, genere_instance
+from solveurs import A_star, genere_instance
 from bench import run_solver
 
 try:

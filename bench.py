@@ -19,8 +19,8 @@ import csv
 import os
 import multiprocessing
 
-from solution import Bfs_optimise
-from utils import *
+from solveurs import Bfs_optimise, A_star, h_super_spectrale, h_manhattan
+from utils import load, genere_instance
 
 
 
@@ -79,25 +79,31 @@ def worker_task(args):
     results = {}
 
     try:
-        # 1. Générer une instance unique pour ce worker
-        # Note : Chaque processus aura sa propre seed aléatoire par défaut
         inst = genere_instance(M, N, obs_count)
-        etat = {
-            'start': inst['start'], 
-            'goal': inst['goal'], 
-            'orientation': inst['orientation']
-        }
-        G = inst['graph']
 
-        # 2. Tester tous les solveurs sur cette instance précise
+        # 1. On prépare les arguments "Communs" (Positionnels)
+        G = inst['graph']
+        start = (inst['start'], inst['orientation'])
+        goal = inst['goal']
+
+        # 2. On prépare les arguments "Spéciaux" (Keyword Arguments)
+        # On met TOUT ici. Ceux qui en ont besoin les prendront.
+        # Les autres les ignoreront grâce au **kwargs.
+        context_data = {
+            'psi': inst['psi'],
+            'eigenvalue': inst['eigenvalue'],
+            'h': h_super_spectrale,
+            'N_cols': N - 1
+        }
+
+        # 3. La boucle propre et universelle
         for solver_func in solveurs:
             solver_name = solver_func.__name__
-
-            # Mesure du temps
             start_time = time.process_time()
-            solver_func(G, (etat['start'], etat['orientation']), etat['goal'])
-            end_time = time.process_time()
 
+            solver_func(G, start, goal, **context_data)
+
+            end_time = time.process_time()
             results[solver_name] = end_time - start_time
 
         return (N, M, obs_count), results, None # Pas d'erreur
@@ -330,6 +336,11 @@ def tracer_courbe(results_med, solver_names, sizes_n, sizes_m, obstacles_list, p
 SOLVER_MAP = {
     'Bfs_optimise': Bfs_optimise,
     'A_star': A_star,
+}
+
+HEURISTIQUE_MAP = {
+    'h_manhattan': h_manhattan,
+    'h_super_spectrale': h_super_spectrale,
 }
 
 

@@ -1,5 +1,6 @@
 from collections import deque
 import heapq, math
+import numpy as np
 
 
 
@@ -18,15 +19,112 @@ delta_move = [
 MAXSTEP = 3
 
 
-def Bfs_optimise(G, start, goal):
+
+
+def h_manhattan(args):
+    r = args[0];  c = args[1]
+    goal_r = args[2];  goal_c = args[3]
+
+    # Calcul Manhattan
+    man = abs(r - goal_r) + abs(c - goal_c)
+
+    # Division par MAXSTEP pour l'admissibilité (si on avance de 3 cases max)
+    return math.ceil(man / MAXSTEP)
+
+
+def h_super_spectrale(args):
+    """
+    Heuristique Hybride : Physique + Spectrale (Optimisation Lookup Table).
+
+    Cette heuristique combine :
+    1. La distance réelle (Manhattan) pour la progression locale.
+    2. La distance de diffusion (Spectrale) pour la topologie globale (éviter les culs-de-sac).
+
+    Optimisation :
+        Au lieu de calculer la norme vectorielle à chaque appel (lent), 
+        elle lit une valeur pré-calculée dans 'spec_map' (instantané O(1)).
+
+    Args:
+        args (tuple): (pos, goal, spec_map, N_cols, dist_start, beta)
+            - pos (tuple): Position actuelle (r, c).
+            - spec_map (np.array): Tableau 1D des distances spectrales pré-calculées vers le but.
+            - N_cols (int): Largeur du graphe (pour convertir r,c en index 1D).
+            - beta (float): Le coefficient "Architecte" (C / lambda_2).
+
+    Returns:
+        float: Le coût estimé pondéré.
+    """
+    # Déballage des arguments nécessaires
+    # On ignore 'goal' qui ne servent pas ici
+    r, c, _, _, spec_map, N_cols, beta = args
+
+    # 1. Calcul de la base physique (Manhattan)
+    val_manhattan = h_manhattan(args)
+
+    # 2. "Kill Switch" (Sécurité de proximité)
+    # Si l'estimation est < 3 pas, on est tout près.
+    # On coupe le spectre pour éviter le micro-bruit numérique et assurer l'atterrissage précis.
+    if val_manhattan < 3:
+        return val_manhattan
+
+    # 3. Composante Spectrale (Si activée et disponible)
+    if spec_map is not None and beta > 0 and N_cols is not None:
+
+        # Conversion index 2D -> 1D
+        idx = r * N_cols + c
+
+        # Lecture directe dans la table (O(1))
+        if 0 <= idx < len(spec_map):
+            d_spec = spec_map[idx]
+
+            # Formule Finale : Physique + (Importance_Difficulté * Distance_Topologique)
+            return val_manhattan + (beta * d_spec)
+
+    # Si pas de spectre, on retourne juste Manhattan
+    return val_manhattan
+
+
+
+
+
+def reconstruct_path(came_from, goal_state):
+    """
+    Parcourt "l'arbre" came_from en arrière pour trouver le chemin.
+    """
+    path = []
+    current = goal_state
+
+    # Remonte le fil
+    while current in came_from:
+        # Récupère le "parent" et l'action qui a mené à 'current'
+        prev_state, action = came_from[current]
+
+        pos = current[0] # La position (r, c) de cet état
+
+        path.append((action, pos))
+
+        current = prev_state # Passe à l'état précédent
+
+        # Le 'None' est le marqueur de début (la racine de l'arbre)
+        if current is None:
+            break
+
+    path.reverse() # Le chemin a été construit de l'arrivée -> départ
+    return path
+
+
+
+
+
+def Bfs_optimise(G, start, goal, **kwargs):
     """
     Effectue un BFS:
     - Les seules actions sont:
         1. Avancer (1..MAXSTEP)
         2. Tourner (G/D) + Avancer (1..MAXSTEP)
     """
+    (start_pos, start_orientation_str) = start
 
-    start_pos, start_orientation_str = start
     start_orientation_int = orientation_map[start_orientation_str]
     start_state = (start_pos, start_orientation_int)  # ((r,c), orientation)
 
@@ -79,19 +177,50 @@ def Bfs_optimise(G, start, goal):
     return None
 
 
-def A_star(G, start, goal):
+
+
+def A_star(G, start, goal, eigenvalue=None, psi=None, h=None, N_cols=None, **kwargs):
     """
     Recherche A*.
     Le robot peut :
-        - Avancer tout droit jusqu’à MAXSTEP cases (coût = +1)
+        - Avancer tout droit jusqu'à MAXSTEP cases (coût = +1)
         - Tourner à gauche/droite puis avancer (rotation incluse, coût = +2)
 
     G : Graphe des intersections {sommet: [voisins]}
     start : tuple ( (ligne, col), orientation_str )
     goal : tuple (ligne, col)
     """
+    # On définit l'agressivité de l'aide spectrale.
+    beta_contextuel = 0.0
 
-    start_pos, start_orientation_str = start
+    if eigenvalue is not None and len(eigenvalue) > 0:
+        # HYPOTHÈSE : eigenvalue a déjà été filtrée dans 'build_structures_normalized' > 0
+        # Donc eigenvalue[0] est la première harmonique significative (lambda_2 ou lambda_3...)
+        lambda_effective = eigenvalue[0]
+
+        # Paramètres
+        C = 0.1             # Sensibilité
+        BETA_MAX = 5.0      # Plafond pour éviter de casser l'admissibilité locale
+
+        # Formule : Plus le graphe est déconnecté (lambda petit), plus beta est grand.
+        beta_contextuel = min(C / lambda_effective, BETA_MAX)
+
+    # Au lieu de calculer des normes dans la boucle (lent), on pré-calcule
+    # la distance spectrale de chaque case vers le but.
+    spec_map = None
+    if psi is not None and N_cols is not None:
+        idx_goal = goal[0] * N_cols + goal[1]
+        
+        # Vérification bornes
+        if 0 <= idx_goal < len(psi):
+            goal_vec = psi[idx_goal]
+
+            # Calcul Vectoriel Numpy : || psi_i - psi_goal || pour tout i
+            # spec_map est un array 1D. spec_map[idx] = distance spectrale.
+            spec_map = np.linalg.norm(psi - goal_vec, axis=1)
+
+    (start_pos, start_orientation_str) = start
+
     start_orientation_int = orientation_map[start_orientation_str]
     start_state = (start_pos, start_orientation_int)
 
@@ -99,12 +228,8 @@ def A_star(G, start, goal):
     h_pop = heapq.heappop
     (goal_i, goal_j) = goal
 
-    def h_manhattan_optim(r, c):
-        man = abs(r - goal_i) + abs(c - goal_j)
-        return math.ceil(man / MAXSTEP)
-
     g_start = 0
-    f_start = g_start + h_manhattan_optim(*start_pos)
+    f_start = g_start + h((*start_pos, goal_i, goal_j, spec_map, N_cols, beta_contextuel))
 
     priority_queue = [(f_start, g_start, start_state)]
     cost = {start_state: g_start}
@@ -154,7 +279,7 @@ def A_star(G, start, goal):
 
                 new_state = (pos_avant, new_orientation)
 
-                h_val = h_manhattan_optim(*pos_avant)
+                h_val = h((*pos_avant, goal_i, goal_j, spec_map, N_cols, beta_contextuel))
                 new_f = new_g_cost_turn + h_val
 
                 # Si le nouvel état n'a jamais été visité ou qu'il a un coup inférieur
@@ -180,7 +305,7 @@ def A_star(G, start, goal):
                 break
 
             new_state = (pos_avant, orientation)
-            h_val = h_manhattan_optim(*pos_avant)
+            h_val = h((*pos_avant, goal_i, goal_j, spec_map, N_cols, beta_contextuel))
             new_f = new_g_cost_move + h_val
 
             if new_state not in cost or new_g_cost_move < cost[new_state]:
@@ -192,29 +317,3 @@ def A_star(G, start, goal):
             old_pos = pos_avant
 
     return None
-
-
-def reconstruct_path(came_from, goal_state):
-    """
-    Parcourt "l'arbre" came_from en arrière pour trouver le chemin.
-    """
-    path = []
-    current = goal_state
-
-    # Remonte le fil
-    while current in came_from:
-        # Récupère le "parent" et l'action qui a mené à 'current'
-        prev_state, action = came_from[current]
-
-        pos = current[0] # La position (r, c) de cet état
-
-        path.append((action, pos))
-
-        current = prev_state # Passe à l'état précédent
-
-        # Le 'None' est le marqueur de début (la racine de l'arbre)
-        if current is None:
-            break
-
-    path.reverse() # Le chemin a été construit de l'arrivée -> départ
-    return path
