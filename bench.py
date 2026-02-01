@@ -8,28 +8,6 @@
 # python bench.py bench -i 6 -s all -t v -m 100 1000 100 -n 100 1000 100
 """
 
-
-"""
-Script de benchmark : Robot sur Grille.
-Version : FINALE (Pro & Robust)
-
-Ce script permet de :
-1. Résoudre une instance unique et sauvegarder le chemin.
-2. Lancer un benchmark massif en parallèle.
-3. Générer des graphiques comparant la rapidité (Temps) et la qualité (Longueur du chemin).
-
-Utilisation :
--------------
-# 1. Mode Benchmark Combinatoire ('u') : N varie, M et Obs sont fixes.
-python bench.py bench -n 20 40 60 80 -m 50 -obs 10 -i 10 -s all -t u
-
-# 2. Mode Benchmark Linéaire ('v') : Tout varie ensemble (Triplets [N,M,Obs]).
-python bench.py bench -n 20 40 -m 20 40 -obs 5 10 -i 10 -s all -t v
-
-# 3. Mode Résolution simple :
-python bench.py solve input/input.txt -s A_star_spectrale
-"""
-
 import time
 import matplotlib
 import matplotlib.pyplot as plt
@@ -42,10 +20,9 @@ import csv
 import os
 import multiprocessing
 
-# --- Imports locaux ---
-# Ces fichiers doivent être dans le même répertoire
 from solveurs import Bfs_optimise, A_star, h_super_spectrale, h_manhattan
 from utils import load, genere_instance
+
 
 
 # =============================================================================
@@ -55,9 +32,7 @@ from utils import load, genere_instance
 class SolverWrapper:
     """
     Remplace functools.partial pour le multiprocessing.
-    
-    Problème résolu : 'partial' ne conserve pas l'attribut __name__ lors du
-    processus de sérialisation (pickling) vers les workers.
+
     Cette classe encapsule la fonction et ses arguments (ex: l'heuristique h)
     tout en garantissant que .__name__ est toujours accessible.
     """
@@ -65,6 +40,7 @@ class SolverWrapper:
         self.func = func
         self.kwargs = kwargs
         self.__name__ = name
+
 
     def __call__(self, *args, **kwargs):
         # Fusionne les arguments par défaut (self.kwargs) avec ceux de l'appel
@@ -86,7 +62,7 @@ SOLVER_MAP = {
 
 
 # =============================================================================
-# FONCTIONS CŒUR (CORE)
+# FONCTIONS RUN
 # =============================================================================
 
 def run_solver(filename, solveur, output):
@@ -94,7 +70,7 @@ def run_solver(filename, solveur, output):
     Mode 'solve' : Résout un fichier unique, affiche les stats et sauve le chemin.
     """
     print(f"--- Mode Résolution : {filename} ---")
-    
+
     # Chargement
     G, etat = load(filename)
     if G is None or etat is None:
@@ -102,7 +78,7 @@ def run_solver(filename, solveur, output):
         return
 
     print(f"Lancement de : {solveur.__name__}...")
-    
+
     # Exécution
     t0 = time.process_time()
     path = solveur(G, (etat['start'], etat['orientation']), etat['goal'])
@@ -315,7 +291,7 @@ def tracer_courbes_completes(stats, solver_names, Ns, Ms, Os, plot_dir, mode):
     """
     # Force 'Agg' pour éviter les erreurs d'affichage (pas de GUI requis)
     matplotlib.use('Agg') 
-    
+
     # Style moderne
     try:
         plt.style.use('seaborn-v0_8-whitegrid')
@@ -463,7 +439,7 @@ def main():
     # Dispatching
     if args.mode == 'solve':
         run_solver(args.filename, SOLVER_MAP[args.solveur], args.output)
-    
+
     elif args.mode == 'bench':
         # Sélection des solveurs
         if 'all' in args.solveurs:

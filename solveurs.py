@@ -40,22 +40,17 @@ def h_super_spectrale(args):
     1. La distance réelle (Manhattan) pour la progression locale.
     2. La distance de diffusion (Spectrale) pour la topologie globale (éviter les culs-de-sac).
 
-    Optimisation :
-        Au lieu de calculer la norme vectorielle à chaque appel (lent), 
-        elle lit une valeur pré-calculée dans 'spec_map' (instantané O(1)).
-
     Args:
         args (tuple): (pos, goal, spec_map, N_cols, dist_start, beta)
             - pos (tuple): Position actuelle (r, c).
             - spec_map (np.array): Tableau 1D des distances spectrales pré-calculées vers le but.
             - N_cols (int): Largeur du graphe (pour convertir r,c en index 1D).
-            - beta (float): Le coefficient "Architecte" (C / lambda_2).
+            - beta (float): Le coefficient d'importance de la distance spectrale (C / lambda_2).
 
     Returns:
         float: Le coût estimé pondéré.
     """
     # Déballage des arguments nécessaires
-    # On ignore 'goal' qui ne servent pas ici
     r, c, _, _, spec_map, N_cols, beta = args
 
     # 1. Calcul de la base physique (Manhattan)
@@ -64,12 +59,11 @@ def h_super_spectrale(args):
     # 2. "Kill Switch" (Sécurité de proximité)
     # Si l'estimation est < 3 pas, on est tout près.
     # On coupe le spectre pour éviter le micro-bruit numérique et assurer l'atterrissage précis.
-    if val_manhattan < 3:
+    if val_manhattan < 5:
         return val_manhattan
 
     # 3. Composante Spectrale (Si activée et disponible)
     if spec_map is not None and beta > 0 and N_cols is not None:
-
         # Conversion index 2D -> 1D
         idx = r * N_cols + c
 
@@ -218,6 +212,7 @@ def A_star(G, start, goal, eigenvalue=None, psi=None, h=None, N_cols=None, **kwa
             # Calcul Vectoriel Numpy : || psi_i - psi_goal || pour tout i
             # spec_map est un array 1D. spec_map[idx] = distance spectrale.
             spec_map = np.linalg.norm(psi - goal_vec, axis=1)
+
 
     (start_pos, start_orientation_str) = start
 
